@@ -34,7 +34,7 @@ async def oauth_metadata():
     base = "https://hostfact.mcp.esrocom.nl"
     return {
         "issuer": base,
-        "authorization_endpoint": f"{base}/oauth/authorize",
+        "authorization_endpoint": f"{base}/authorize",
         "token_endpoint": f"{base}/oauth/token",
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code"],
@@ -53,6 +53,7 @@ async def oauth_authorize(request: Request):
         url += f"&state={state}"
     return RedirectResponse(url=url, status_code=302)
 
+@app.post("/token")
 @app.post("/oauth/token")
 async def oauth_token(request: Request):
     return {
