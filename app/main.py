@@ -41,6 +41,7 @@ async def oauth_metadata():
         "token_endpoint_auth_methods_supported": ["none"]
     }
 
+@app.get("/authorize")
 @app.get("/oauth/authorize")
 async def oauth_authorize(request: Request):
     params = dict(request.query_params)
