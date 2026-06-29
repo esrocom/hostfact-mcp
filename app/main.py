@@ -35,10 +35,11 @@ async def oauth_metadata():
     return {
         "issuer": base,
         "authorization_endpoint": f"{base}/authorize",
-        "token_endpoint": f"{base}/oauth/token",
+        "token_endpoint": f"{base}/token",
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code"],
-        "token_endpoint_auth_methods_supported": ["none"]
+        "token_endpoint_auth_methods_supported": ["none"],
+        "code_challenge_methods_supported": ["S256"]
     }
 
 @app.get("/authorize")
