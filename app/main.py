@@ -47,7 +47,10 @@ async def oauth_authorize(request: Request):
     redirect_uri = params.get("redirect_uri", "")
     state = params.get("state", "")
     code = "esrocom-auth-code-2026"
-    return RedirectResponse(url=f"{redirect_uri}?code={code}&state={state}")
+    url = f"{redirect_uri}?code={code}"
+    if state:
+        url += f"&state={state}"
+    return RedirectResponse(url=url, status_code=302)
 
 @app.post("/oauth/token")
 async def oauth_token(request: Request):
