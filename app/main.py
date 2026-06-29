@@ -3,6 +3,7 @@ import httpx
 import json
 import asyncio
 from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import JSONResponse, RedirectResponse, HTMLResponse
 
 app = FastAPI(title="Hostfact MCP Server", version="1.0.0")
 
@@ -23,6 +24,42 @@ async def hostfact_call(controller: str, action: str, params: dict = {}) -> dict
         resp = await client.post(HOSTFACT_URL, data=data)
         resp.raise_for_status()
         return resp.json()
+
+# ─────────────────────────────────────────────
+# OAuth2 endpoints (minimal, for Claude.ai)
+# ─────────────────────────────────────────────
+
+@app.get("/.well-known/oauth-authorization-server")
+async def oauth_metadata():
+    base = "https://hostfact.mcp.esrocom.nl"
+    return {
+        "issuer": base,
+        "authorization_endpoint": f"{base}/oauth/authorize",
+        "token_endpoint": f"{base}/oauth/token",
+        "response_types_supported": ["code"],
+        "grant_types_supported": ["authorization_code"],
+        "token_endpoint_auth_methods_supported": ["none"]
+    }
+
+@app.get("/oauth/authorize")
+async def oauth_authorize(request: Request):
+    params = dict(request.query_params)
+    redirect_uri = params.get("redirect_uri", "")
+    state = params.get("state", "")
+    code = "esrocom-auth-code-2026"
+    return RedirectResponse(url=f"{redirect_uri}?code={code}&state={state}")
+
+@app.post("/oauth/token")
+async def oauth_token(request: Request):
+    return {
+        "access_token": MCP_AUTH_TOKEN,
+        "token_type": "bearer",
+        "expires_in": 86400
+    }
+
+# ─────────────────────────────────────────────
+# MCP Tools
+# ─────────────────────────────────────────────
 
 TOOLS = [
     {"name": "list_debtors", "description": "Haal een lijst van debiteuren op uit Hostfact.", "inputSchema": {"type": "object", "properties": {"search": {"type": "string"}, "limit": {"type": "integer", "default": 50}}}},
