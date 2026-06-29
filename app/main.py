@@ -171,6 +171,10 @@ async def handle_tool(name: str, arguments: dict) -> str:
     except Exception as e:
         return f"Fout bij {name}: {str(e)}"
 
+@app.get("/mcp")
+async def mcp_get(request: Request):
+    return {"jsonrpc":"2.0","id":0,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"hostfact-mcp","version":"1.0.0"}}}
+
 @app.post("/mcp")
 async def mcp_post(request: Request):
     check_auth(request)
