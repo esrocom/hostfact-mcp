@@ -57,11 +57,17 @@ async def oauth_authorize(request: Request):
 @app.post("/token")
 @app.post("/oauth/token")
 async def oauth_token(request: Request):
-    return {
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        body = await request.json()
+    else:
+        form = await request.form()
+        body = dict(form)
+    return JSONResponse({
         "access_token": MCP_AUTH_TOKEN,
         "token_type": "bearer",
         "expires_in": 86400
-    }
+    })
 
 # ─────────────────────────────────────────────
 # MCP Tools
