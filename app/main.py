@@ -203,3 +203,15 @@ async def mcp_post(request: Request):
 @app.get("/health")
 async def health():
     return {"status": "ok", "server": "hostfact-mcp", "version": "1.0.0"}
+
+@app.post("/register")
+async def oauth_register(request: Request):
+    body = await request.json()
+    return JSONResponse({
+        "client_id": "esrocom-hostfact",
+        "client_id_issued_at": 1735000000,
+        "redirect_uris": body.get("redirect_uris", []),
+        "token_endpoint_auth_method": "none",
+        "grant_types": ["authorization_code"],
+        "response_types": ["code"]
+    })
