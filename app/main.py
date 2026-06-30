@@ -8,7 +8,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, RedirectResponse
 
-app = FastAPI(title="Hostfact MCP Server", version="1.3.0")
+app = FastAPI(title="Hostfact MCP Server", version="1.4.0")
 
 # ─────────────────────────────────────────────
 # Audit log
@@ -17,7 +17,7 @@ app = FastAPI(title="Hostfact MCP Server", version="1.3.0")
 AUDIT_LOG_PATH = os.getenv("AUDIT_LOG_PATH", "/data/audit.log")
 
 # Write-actions: these mutate data in Hostfact
-WRITE_TOOLS = {"edit_product", "edit_service", "add_debtor", "add_service", "add_invoice"}
+WRITE_TOOLS = {"edit_product", "edit_service", "add_product", "add_debtor", "add_service", "add_invoice"}
 
 def _audit(tool: str, arguments: dict, result: str, error: bool = False):
     """Append one line to the audit log."""
@@ -213,12 +213,14 @@ TOOLS = [
     {
         "name": "edit_service",
         "description": (
-            "Pas een bestaand abonnement aan (fase 2 — abonnement-synchronisatie met Pax8). "
-            "Gebruik dit om aantallen of prijs bij te werken op basis van Pax8-gegevens. "
+            "Pas een bestaand abonnement aan. "
+            "Gebruik product_code om een artikelnummer te koppelen aan een service zonder code. "
+            "Gebruik number, price_excl of periodic om facturatiegegevens bij te werken. "
             "Vereist het interne service-ID van get_service."
         ),
         "inputSchema": {"type": "object", "required": ["identifier"], "properties": {
             "identifier": {"type": "string", "description": "Intern Hostfact service-ID"},
+            "product_code": {"type": "string", "description": "Productcode om aan de service te koppelen (bijv. MST-NCE-104-C100)"},
             "number": {"type": "integer", "description": "Nieuw aantal (bijv. aantal licenties)"},
             "price_excl": {"type": "number", "description": "Nieuwe prijs excl. BTW"},
             "periodic": {"type": "string", "description": "Facturatieperiode: m (maand), k (kwartaal), j (jaar)"}
@@ -267,6 +269,18 @@ TOOLS = [
     },
 
     # ── AANMAKEN ──
+    {
+        "name": "add_product",
+        "description": "Maak een nieuw product aan in de Hostfact productcatalogus.",
+        "inputSchema": {"type": "object", "required": ["product_code", "product_name"], "properties": {
+            "product_code": {"type": "string", "description": "Productcode, bijv. MST-NCE-104-C100"},
+            "product_name": {"type": "string", "description": "Productnaam"},
+            "product_description": {"type": "string", "description": "Omschrijving van het product"},
+            "price_excl": {"type": "number", "description": "Prijs excl. BTW"},
+            "tax_percentage": {"type": "integer", "description": "BTW-percentage (bijv. 21)", "default": 21},
+            "price_period": {"type": "string", "description": "Facturatieperiode: m (maand), k (kwartaal), j (jaar), e (eenmalig)"}
+        }}
+    },
     {
         "name": "add_debtor",
         "description": "Maak een nieuwe debiteur aan in Hostfact.",
@@ -510,9 +524,11 @@ async def _handle_tool_inner(name: str, arguments: dict) -> str:
             ]
             return "\n".join(lines)
 
-        # ── edit_service (NEW — fase 2) ──
+        # ── edit_service ──
         elif name == "edit_service":
             subscription = {}
+            if arguments.get("product_code") is not None:
+                subscription["ProductCode"] = arguments["product_code"]
             if arguments.get("number") is not None:
                 subscription["Number"] = arguments["number"]
             if arguments.get("price_excl") is not None:
@@ -523,6 +539,8 @@ async def _handle_tool_inner(name: str, arguments: dict) -> str:
             result = await hostfact_call("service", "edit", params)
             if result.get("status") == "success":
                 changes = []
+                if arguments.get("product_code") is not None:
+                    changes.append(f"productcode → {arguments['product_code']}")
                 if arguments.get("number") is not None:
                     changes.append(f"aantal → {arguments['number']}")
                 if arguments.get("price_excl") is not None:
@@ -682,6 +700,25 @@ async def _handle_tool_inner(name: str, arguments: dict) -> str:
 
             return "\n".join(lines)
 
+        # ── add_product (NEW) ──
+        elif name == "add_product":
+            params = {
+                "ProductCode": arguments["product_code"],
+                "ProductName": arguments["product_name"],
+            }
+            if arguments.get("product_description"):
+                params["ProductDescription"] = arguments["product_description"]
+            if arguments.get("price_excl") is not None:
+                params["PriceExcl"] = arguments["price_excl"]
+            if arguments.get("tax_percentage") is not None:
+                params["TaxPercentage"] = arguments["tax_percentage"]
+            if arguments.get("price_period"):
+                params["PricePeriod"] = arguments["price_period"]
+            result = await hostfact_call("product", "add", params)
+            if result.get("status") == "success":
+                return f"✅ Product aangemaakt: {arguments['product_code']} — {arguments['product_name']}"
+            return f"❌ Fout: {result.get('errors', result)}"
+
         # ── add_debtor ──
         elif name == "add_debtor":
             params = {"CompanyName": arguments["company_name"], "EmailAddress": arguments["email"]}
@@ -749,7 +786,7 @@ async def mcp_get(request: Request):
         "result": {
             "protocolVersion": "2024-11-05",
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "hostfact-mcp", "version": "1.3.0"}
+            "serverInfo": {"name": "hostfact-mcp", "version": "1.4.0"}
         }
     }
 
@@ -767,7 +804,7 @@ async def mcp_post(request: Request):
             "result": {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "hostfact-mcp", "version": "1.3.0"}
+                "serverInfo": {"name": "hostfact-mcp", "version": "1.4.0"}
             }
         }
     elif method == "tools/list":
@@ -785,7 +822,7 @@ async def mcp_post(request: Request):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "server": "hostfact-mcp", "version": "1.3.0"}
+    return {"status": "ok", "server": "hostfact-mcp", "version": "1.4.0"}
 
 @app.post("/register")
 async def oauth_register(request: Request):
