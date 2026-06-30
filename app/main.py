@@ -2,10 +2,39 @@ import os
 import httpx
 import json
 import asyncio
+import logging
+from datetime import datetime, timezone
+from pathlib import Path
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, RedirectResponse
 
-app = FastAPI(title="Hostfact MCP Server", version="1.2.2")
+app = FastAPI(title="Hostfact MCP Server", version="1.3.0")
+
+# ─────────────────────────────────────────────
+# Audit log
+# ─────────────────────────────────────────────
+
+AUDIT_LOG_PATH = os.getenv("AUDIT_LOG_PATH", "/data/audit.log")
+
+# Write-actions: these mutate data in Hostfact
+WRITE_TOOLS = {"edit_product", "edit_service", "add_debtor", "add_service", "add_invoice"}
+
+def _audit(tool: str, arguments: dict, result: str, error: bool = False):
+    """Append one line to the audit log."""
+    try:
+        log_dir = Path(AUDIT_LOG_PATH).parent
+        log_dir.mkdir(parents=True, exist_ok=True)
+        kind = "[WRITE]" if tool in WRITE_TOOLS else "[READ]"
+        status = "ERROR" if error else "OK"
+        # Redact api_key if accidentally included in arguments
+        safe_args = {k: v for k, v in arguments.items() if "key" not in k.lower()}
+        ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        line = f'{ts} {kind} {status} tool={tool} args={json.dumps(safe_args, ensure_ascii=False)} result_preview={result[:120].replace(chr(10), " ")}\n'
+        with open(AUDIT_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception as ex:
+        # Never crash the server because of a logging failure
+        logging.warning(f"Audit log write failed: {ex}")
 
 HOSTFACT_URL = os.getenv("HOSTFACT_URL", "")
 HOSTFACT_API_KEY = os.getenv("HOSTFACT_API_KEY", "")
@@ -288,6 +317,13 @@ TOOLS = [
 # ─────────────────────────────────────────────
 
 async def handle_tool(name: str, arguments: dict) -> str:
+    result = await _handle_tool_inner(name, arguments)
+    error = result.startswith("❌") or result.startswith("Fout") or result.startswith("Onbekende")
+    _audit(name, arguments, result, error=error)
+    return result
+
+
+async def _handle_tool_inner(name: str, arguments: dict) -> str:
     try:
 
         # ── list_debtors ──
@@ -713,7 +749,7 @@ async def mcp_get(request: Request):
         "result": {
             "protocolVersion": "2024-11-05",
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "hostfact-mcp", "version": "1.2.2"}
+            "serverInfo": {"name": "hostfact-mcp", "version": "1.3.0"}
         }
     }
 
@@ -731,7 +767,7 @@ async def mcp_post(request: Request):
             "result": {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "hostfact-mcp", "version": "1.2.2"}
+                "serverInfo": {"name": "hostfact-mcp", "version": "1.3.0"}
             }
         }
     elif method == "tools/list":
@@ -749,7 +785,7 @@ async def mcp_post(request: Request):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "server": "hostfact-mcp", "version": "1.2.2"}
+    return {"status": "ok", "server": "hostfact-mcp", "version": "1.3.0"}
 
 @app.post("/register")
 async def oauth_register(request: Request):
