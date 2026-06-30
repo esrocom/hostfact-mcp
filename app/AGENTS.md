@@ -74,7 +74,17 @@ Some services exist without a linked product (empty `ProductCode`).
 For these, `edit_product` cannot be used (there is no product to look up).
 Use `edit_service` with `product_code` to directly set the ProductCode on the service subscription.
 
-### 8. Duplicate product codes
+### 8. Subscription (service/edit) must be JSON-serialized
+The `Subscription` parameter in `service/edit` must be passed as a **JSON string**, not as a nested dict.
+Same pattern as `InvoiceLines` in `invoice/add`.
+
+```python
+params = {"Identifier": identifier, "Subscription": json.dumps(subscription_dict)}
+```
+
+Passing a raw dict causes: *"Invalid type for 'Subscription'"*
+
+### 9. Duplicate product codes
 `product/add` rejects a `ProductCode` that already exists in the catalog.
 Always call `get_product` first to verify the code does not exist before attempting to create it.
 
