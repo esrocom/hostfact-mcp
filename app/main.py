@@ -5,7 +5,7 @@ import asyncio
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, RedirectResponse
 
-app = FastAPI(title="Hostfact MCP Server", version="1.2.0")
+app = FastAPI(title="Hostfact MCP Server", version="1.2.1")
 
 HOSTFACT_URL = os.getenv("HOSTFACT_URL", "https://administratie.esrocom.nl/Pro/apiv2/api.php")
 HOSTFACT_API_KEY = os.getenv("HOSTFACT_API_KEY", "")
@@ -514,9 +514,16 @@ async def handle_tool(name: str, arguments: dict) -> str:
 
         # ── edit_product (NEW) ──
         elif name == "edit_product":
-            params = {"ProductCode": arguments["product_code"]}
+            # Stap 1: haal intern Identifier op via product/show
+            show_result = await hostfact_call("product", "show", {"ProductCode": arguments["product_code"]})
+            product = show_result.get("product", {})
+            identifier = product.get("Identifier")
+            if not identifier:
+                return f"❌ Product '{arguments['product_code']}' niet gevonden (of geen Identifier teruggegeven)."
+            # Stap 2: edit via Identifier
+            params = {"Identifier": identifier}
             if arguments.get("new_product_code"):
-                params["NewProductCode"] = arguments["new_product_code"]
+                params["ProductCode"] = arguments["new_product_code"]
             if arguments.get("product_name"):
                 params["ProductName"] = arguments["product_name"]
             if arguments.get("price_excl") is not None:
@@ -706,7 +713,7 @@ async def mcp_get(request: Request):
         "result": {
             "protocolVersion": "2024-11-05",
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "hostfact-mcp", "version": "1.2.0"}
+            "serverInfo": {"name": "hostfact-mcp", "version": "1.2.1"}
         }
     }
 
@@ -724,7 +731,7 @@ async def mcp_post(request: Request):
             "result": {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "hostfact-mcp", "version": "1.2.0"}
+                "serverInfo": {"name": "hostfact-mcp", "version": "1.2.1"}
             }
         }
     elif method == "tools/list":
@@ -742,7 +749,7 @@ async def mcp_post(request: Request):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "server": "hostfact-mcp", "version": "1.2.0"}
+    return {"status": "ok", "server": "hostfact-mcp", "version": "1.2.1"}
 
 @app.post("/register")
 async def oauth_register(request: Request):
