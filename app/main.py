@@ -8,7 +8,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, RedirectResponse
 
-app = FastAPI(title="Hostfact MCP Server", version="1.4.2")
+app = FastAPI(title="Hostfact MCP Server", version="1.4.3")
 
 # ─────────────────────────────────────────────
 # Audit log
@@ -536,7 +536,10 @@ async def _handle_tool_inner(name: str, arguments: dict) -> str:
                 subscription["PriceExcl"] = arguments["price_excl"]
             if arguments.get("periodic"):
                 subscription["Periodic"] = arguments["periodic"]
-            params = {"Identifier": arguments["identifier"], "Subscription": json.dumps(subscription)}
+            # Hostfact verwacht Subscription-velden als bracket-notatie: Subscription[ProductCode] etc.
+            params = {"Identifier": arguments["identifier"]}
+            for k, v in subscription.items():
+                params[f"Subscription[{k}]"] = v
             result = await hostfact_call("service", "edit", params)
             if result.get("status") == "success":
                 changes = []
@@ -788,7 +791,7 @@ async def mcp_get(request: Request):
         "result": {
             "protocolVersion": "2024-11-05",
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "hostfact-mcp", "version": "1.4.2"}
+            "serverInfo": {"name": "hostfact-mcp", "version": "1.4.3"}
         }
     }
 
@@ -806,7 +809,7 @@ async def mcp_post(request: Request):
             "result": {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "hostfact-mcp", "version": "1.4.2"}
+                "serverInfo": {"name": "hostfact-mcp", "version": "1.4.3"}
             }
         }
     elif method == "tools/list":
@@ -824,7 +827,7 @@ async def mcp_post(request: Request):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "server": "hostfact-mcp", "version": "1.4.2"}
+    return {"status": "ok", "server": "hostfact-mcp", "version": "1.4.3"}
 
 @app.post("/register")
 async def oauth_register(request: Request):
