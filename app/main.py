@@ -8,7 +8,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, RedirectResponse
 
-app = FastAPI(title="Hostfact MCP Server", version="1.4.0")
+app = FastAPI(title="Hostfact MCP Server", version="1.4.1")
 
 # ─────────────────────────────────────────────
 # Audit log
@@ -271,11 +271,12 @@ TOOLS = [
     # ── AANMAKEN ──
     {
         "name": "add_product",
-        "description": "Maak een nieuw product aan in de Hostfact productcatalogus.",
-        "inputSchema": {"type": "object", "required": ["product_code", "product_name"], "properties": {
-            "product_code": {"type": "string", "description": "Productcode, bijv. MST-NCE-104-C100"},
-            "product_name": {"type": "string", "description": "Productnaam"},
-            "product_description": {"type": "string", "description": "Omschrijving van het product"},
+        "description": "Maak een nieuw product aan in de Hostfact productcatalogus. Controleer eerst met get_product of de productcode al bestaat.",
+        "inputSchema": {"type": "object", "required": ["product_code", "product_name", "description"], "properties": {
+            "product_code": {"type": "string", "description": "Productcode, bijv. MST-NCE-122-C100"},
+            "product_name": {"type": "string", "description": "Productnaam zoals getoond in de catalogus"},
+            "description": {"type": "string", "description": "Factuuropschrift — tekst die op de factuurregels verschijnt (verplicht)"},
+            "product_description": {"type": "string", "description": "Uitgebreide catalogusomschrijving (optioneel)"},
             "price_excl": {"type": "number", "description": "Prijs excl. BTW"},
             "tax_percentage": {"type": "integer", "description": "BTW-percentage (bijv. 21)", "default": 21},
             "price_period": {"type": "string", "description": "Facturatieperiode: m (maand), k (kwartaal), j (jaar), e (eenmalig)"}
@@ -700,11 +701,12 @@ async def _handle_tool_inner(name: str, arguments: dict) -> str:
 
             return "\n".join(lines)
 
-        # ── add_product (NEW) ──
+        # ── add_product ──
         elif name == "add_product":
             params = {
                 "ProductCode": arguments["product_code"],
                 "ProductName": arguments["product_name"],
+                "Description": arguments["description"],  # verplicht factuuropschrift
             }
             if arguments.get("product_description"):
                 params["ProductDescription"] = arguments["product_description"]
@@ -786,7 +788,7 @@ async def mcp_get(request: Request):
         "result": {
             "protocolVersion": "2024-11-05",
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "hostfact-mcp", "version": "1.4.0"}
+            "serverInfo": {"name": "hostfact-mcp", "version": "1.4.1"}
         }
     }
 
@@ -804,7 +806,7 @@ async def mcp_post(request: Request):
             "result": {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "hostfact-mcp", "version": "1.4.0"}
+                "serverInfo": {"name": "hostfact-mcp", "version": "1.4.1"}
             }
         }
     elif method == "tools/list":
@@ -822,7 +824,7 @@ async def mcp_post(request: Request):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "server": "hostfact-mcp", "version": "1.4.0"}
+    return {"status": "ok", "server": "hostfact-mcp", "version": "1.4.1"}
 
 @app.post("/register")
 async def oauth_register(request: Request):

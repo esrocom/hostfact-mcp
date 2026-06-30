@@ -61,6 +61,23 @@ Concept (0) and Gecrediteerd (9) are excluded from revenue calculations.
 | j | Yearly |
 | e | One-time |
 
+### 6. product/add requires a Description (invoice line text)
+`product/add` requires a separate `Description` field — this is the text that appears on invoice lines.
+It is **not** the same as `ProductDescription` (the catalog description).
+
+Omitting `Description` causes the error: *"De omschrijving voor op de factuur is niet juist ingevuld"*
+
+Always supply `Description` (short invoice line text, e.g. "Microsoft Entra ID P2 per user/month") when calling `add_product`.
+
+### 7. Services with no ProductCode
+Some services exist without a linked product (empty `ProductCode`).
+For these, `edit_product` cannot be used (there is no product to look up).
+Use `edit_service` with `product_code` to directly set the ProductCode on the service subscription.
+
+### 8. Duplicate product codes
+`product/add` rejects a `ProductCode` that already exists in the catalog.
+Always call `get_product` first to verify the code does not exist before attempting to create it.
+
 ---
 
 ## Available tools
@@ -76,10 +93,11 @@ Concept (0) and Gecrediteerd (9) are excluded from revenue calculations.
 | `get_creditinvoice` | Credit invoice detail |
 | `list_services` | Active subscriptions (filter via `debtor_code`) |
 | `get_service` | Subscription detail via internal service ID |
-| `edit_service` | Update subscription (quantity, price, period) |
+| `edit_service` | Update subscription (quantity, price, period, or product_code) |
 | `list_products` | Product catalog |
 | `get_product` | Product detail |
 | `edit_product` | Update product (including changing product code) |
+| `add_product` | Create new product (requires product_code, product_name, description, price_excl, price_period) |
 | `add_debtor` | Create new debtor |
 | `add_service` | Add subscription |
 | `add_invoice` | Create invoice |
