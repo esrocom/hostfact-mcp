@@ -1,44 +1,43 @@
 # AGENTS.md — Hostfact MCP Server
 
-Instructies en kennis voor AI-systemen die werken met deze repository.
+Instructions and domain knowledge for AI systems working with this repository.
 
-## Doel
-Deze MCP server koppelt Hostfact (verkoop/facturatie) aan Claude.ai.
-Primair gebruik: cross-checks tussen Pax8 (inkoop) en Hostfact (verkoop), en beheer van abonnementen.
+## Purpose
+This MCP server connects Hostfact (invoicing/billing) to Claude.ai and other AI systems via the Model Context Protocol.
 
 ---
 
-## Hostfact API — Belangrijke valkuilen
+## Hostfact API — Important gotchas
 
-### 1. Filteren op debiteur bij invoice/list
-De Hostfact API accepteert `DebtorCode` **niet** als directe parameter bij `invoice/list`.
-Gebruik altijd `searchat` + `searchfor`:
+### 1. Filtering invoices by debtor
+The Hostfact API does **not** accept `DebtorCode` as a direct parameter in `invoice/list`.
+Always use `searchat` + `searchfor`:
 
 ```
 searchat=DebtorCode
-searchfor=DB8595
+searchfor=<DebtorCode>
 ```
 
-Direct `DebtorCode=DB8595` meegeven wordt genegeerd — de API retourneert dan alle facturen.
+Passing `DebtorCode=<value>` directly is silently ignored — the API returns all invoices.
 
-### 2. Product → Service relatie
-Een **product** in de Hostfact catalogus heeft een `ProductCode` (bijv. `MST-NCE-104-C100`).
-Een **service** (abonnement) verwijst naar een product via diezelfde `ProductCode`.
+### 2. Product → Service relationship
+A **product** in the Hostfact catalog has a `ProductCode`.
+A **service** (subscription) references a product via that same `ProductCode`.
 
-**Als je een artikelnummer wil corrigeren op een service:**
-→ Pas het product aan in de catalogus (`product/edit`), niet de service.
-→ De service neemt de nieuwe productcode automatisch over.
+**To correct an article code on a service:**
+→ Edit the product in the catalog (`product/edit`), not the service.
+→ The service automatically reflects the updated product code.
 
-De `edit_service` tool is bedoeld voor het aanpassen van **aantallen, prijs of periode** — niet voor het wijzigen van het artikelnummer.
+`edit_service` is for updating **quantity, price or billing period** — not for changing the article/product code.
 
-### 3. Identifier vs. ProductCode bij edits
-Voor `product/edit` en `service/edit` heeft de Hostfact API het interne numerieke `Identifier` nodig — niet de `ProductCode` of `DebtorCode`.
+### 3. Identifier required for edits
+For `product/edit` and `service/edit`, the Hostfact API requires the internal numeric `Identifier` — not `ProductCode` or `DebtorCode`.
 
-Werkwijze:
-1. Doe eerst een `product/show` of `service/show` om het `Identifier` op te halen.
-2. Gebruik dat `Identifier` in de edit-call.
+Workflow:
+1. Call `product/show` or `service/show` first to retrieve the `Identifier`.
+2. Use that `Identifier` in the edit call.
 
-### 4. Status codes facturen
+### 4. Invoice status codes
 | Code | Label |
 |------|-------|
 | 0 | Concept |
@@ -52,51 +51,35 @@ Werkwijze:
 | 8 | Creditfactuur |
 | 9 | Gecrediteerd |
 
-Concept (0) en Gecrediteerd (9) worden uitgesloten bij omzetberekeningen.
+Concept (0) and Gecrediteerd (9) are excluded from revenue calculations.
 
-### 5. Facturatieperiode codes
-| Code | Betekenis |
-|------|-----------|
-| m | Maand |
-| k | Kwartaal |
-| j | Jaar |
-| e | Eenmalig |
-
----
-
-## Artikelnummer conventies (Esrocom)
-
-| Prefix | Categorie |
-|--------|-----------|
-| `MST-NCE-*` | Microsoft 365 / Office 365 licenties (NCE) |
-| `MST-3PI-*` | Derde partij software via Microsoft-kanaal |
-| `AC-*` | QBIC Cloud server componenten |
-| `QBIC-*` | QBIC eigen diensten (EDR, backup, security) |
-| `voip-*` | VoIP abonnementen |
-| `ict2.0-*` | ICT Beheer 2.0 abonnementen |
-| `BG-*` | Glasvezel/internetverbindingen |
-
-Microsoft 365 licenties horen **altijd** het prefix `MST-NCE-` te hebben. Andere prefixen (zoals `SW-Abo`, `O365-*`, lege codes) zijn verouderd of incorrect.
+### 5. Billing period codes
+| Code | Meaning |
+|------|---------|
+| m | Monthly |
+| k | Quarterly |
+| j | Yearly |
+| e | One-time |
 
 ---
 
-## Beschikbare tools
+## Available tools
 
-| Tool | Actie |
-|------|-------|
-| `list_debtors` | Lijst debiteuren |
-| `get_debtor` | Debiteur detail |
-| `get_debtor_summary` | Klantoverzicht incl. abonnementen + facturen (ondersteunt `year_filter`) |
-| `list_invoices` | Facturen opvragen (filter via `debtor_code`, `date_from`, `status_filter`) |
-| `get_invoice` | Factuur detail incl. regels en betaalhistorie |
-| `list_creditinvoices` | Creditfacturen opvragen |
-| `get_creditinvoice` | Creditfactuur detail |
-| `list_services` | Actieve abonnementen (filter via `debtor_code`) |
-| `get_service` | Abonnement detail via intern service-ID |
-| `edit_service` | Abonnement aanpassen (aantal, prijs, periode) |
-| `list_products` | Productcatalogus |
+| Tool | Action |
+|------|--------|
+| `list_debtors` | List debtors |
+| `get_debtor` | Debtor detail |
+| `get_debtor_summary` | Full customer overview incl. subscriptions + invoices (supports `year_filter`) |
+| `list_invoices` | Fetch invoices (filter via `debtor_code`, `date_from`, `status_filter`) |
+| `get_invoice` | Invoice detail incl. lines and payment history |
+| `list_creditinvoices` | Fetch credit invoices |
+| `get_creditinvoice` | Credit invoice detail |
+| `list_services` | Active subscriptions (filter via `debtor_code`) |
+| `get_service` | Subscription detail via internal service ID |
+| `edit_service` | Update subscription (quantity, price, period) |
+| `list_products` | Product catalog |
 | `get_product` | Product detail |
-| `edit_product` | Product aanpassen (incl. productcode wijzigen) |
-| `add_debtor` | Nieuwe debiteur aanmaken |
-| `add_service` | Abonnement toevoegen |
-| `add_invoice` | Factuur aanmaken |
+| `edit_product` | Update product (including changing product code) |
+| `add_debtor` | Create new debtor |
+| `add_service` | Add subscription |
+| `add_invoice` | Create invoice |

@@ -5,9 +5,9 @@ import asyncio
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, RedirectResponse
 
-app = FastAPI(title="Hostfact MCP Server", version="1.2.1")
+app = FastAPI(title="Hostfact MCP Server", version="1.2.2")
 
-HOSTFACT_URL = os.getenv("HOSTFACT_URL", "https://administratie.esrocom.nl/Pro/apiv2/api.php")
+HOSTFACT_URL = os.getenv("HOSTFACT_URL", "")
 HOSTFACT_API_KEY = os.getenv("HOSTFACT_API_KEY", "")
 MCP_AUTH_TOKEN = os.getenv("MCP_AUTH_TOKEN", "")
 
@@ -58,7 +58,7 @@ def fmt_periodic(p) -> str:
 
 @app.get("/.well-known/oauth-authorization-server")
 async def oauth_metadata():
-    base = "https://hostfact.mcp.esrocom.nl"
+    base = os.getenv("MCP_BASE_URL", "https://localhost")
     return {
         "issuer": base,
         "authorization_endpoint": f"{base}/authorize",
@@ -75,7 +75,7 @@ async def oauth_authorize(request: Request):
     params = dict(request.query_params)
     redirect_uri = params.get("redirect_uri", "")
     state = params.get("state", "")
-    code = "esrocom-auth-code-2026"
+    code = "hostfact-mcp-auth-code"
     url = f"{redirect_uri}?code={code}"
     if state:
         url += f"&state={state}"
@@ -713,7 +713,7 @@ async def mcp_get(request: Request):
         "result": {
             "protocolVersion": "2024-11-05",
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "hostfact-mcp", "version": "1.2.1"}
+            "serverInfo": {"name": "hostfact-mcp", "version": "1.2.2"}
         }
     }
 
@@ -731,7 +731,7 @@ async def mcp_post(request: Request):
             "result": {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "hostfact-mcp", "version": "1.2.1"}
+                "serverInfo": {"name": "hostfact-mcp", "version": "1.2.2"}
             }
         }
     elif method == "tools/list":
@@ -749,13 +749,13 @@ async def mcp_post(request: Request):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "server": "hostfact-mcp", "version": "1.2.1"}
+    return {"status": "ok", "server": "hostfact-mcp", "version": "1.2.2"}
 
 @app.post("/register")
 async def oauth_register(request: Request):
     body = await request.json()
     return JSONResponse({
-        "client_id": "esrocom-hostfact",
+        "client_id": "hostfact-mcp-client",
         "client_id_issued_at": 1735000000,
         "redirect_uris": body.get("redirect_uris", []),
         "token_endpoint_auth_method": "none",
