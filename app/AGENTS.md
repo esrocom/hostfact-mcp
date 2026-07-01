@@ -91,33 +91,60 @@ Passing a raw dict or JSON string causes: *"Invalid type for 'Subscription'"*
 `product/add` rejects a `ProductCode` that already exists in the catalog.
 Always call `get_product` first to verify the code does not exist before attempting to create it.
 
-### 10. Concept invoices have no InvoiceCode
-Draft invoices (`Status = 0`, "Concept") often do not have a finalized `InvoiceCode` yet
-(it's only assigned once the invoice is sent). `invoice/show`, `invoiceline/add`,
-`invoiceline/delete` and `invoice/delete` all accept `Identifier` (internal numeric ID)
-as an alternative to `InvoiceCode` — use `Identifier` when working with concept invoices.
+### 10. Concept invoices DO have an InvoiceCode — just not an "F..." one, and NEVER guess `identifier` from it
+Draft invoices (`Status = 0`, "Concept") are displayed with an `InvoiceCode` in the form
+`"[concept]NNNN"` — they do have a code, it just isn't the final `F...`-style number assigned
+once the invoice is sent.
 
-`get_invoice`, `add_invoice_line`, `delete_invoice_line` and `delete_invoice` all accept
-either `invoice_code` or `identifier`; prefer `identifier` for anything still in Concept
-status.
+`get_invoice`, `add_invoice_line`, `delete_invoice_line` and `delete_invoice` all accept either
+`invoice_code` or `identifier`. For a concept invoice, always pass the **entire string**
+`"[concept]NNNN"` as `invoice_code` — never extract `NNNN` and pass it as `identifier`.
+
+Confirmed by a live test: calling a tool with `identifier: "3874"` (the number taken from a
+label `[concept]3874`) silently resolved to a completely unrelated, already-paid invoice from
+2016 belonging to a different debtor — no error was raised, it just returned the wrong invoice.
+The number after `[concept]` is part of the `InvoiceCode` string and is unrelated to Hostfact's
+internal `Identifier` sequence; small integers coincidentally overlap between the two.
+
+Only use `identifier` when it has been obtained directly from a prior API response's
+`Identifier` field (e.g. `InvoiceLines[].Identifier`, or a service/debtor `Identifier`) — never
+by guessing from a displayed label.
 
 ### 11. Merging concept invoices
 Hostfact's own "merge draft invoices" UI action has no dedicated API endpoint — it's built
 from the same primitives exposed here:
-1. `get_invoice` (via `identifier`) on each concept invoice to read its lines.
-2. `add_invoice_line` to copy the lines from the invoice(s) being merged away onto the
-   invoice that will remain ("master").
+1. `get_invoice` (via `invoice_code`, full string incl. `[concept]` prefix if applicable) on
+   each concept invoice to read its lines.
+2. `add_invoice_line` to copy the lines from the invoice(s) being merged away onto the invoice
+   that will remain ("master").
 3. `delete_invoice` on the now-empty source invoice(s).
 
-Always verify the copy succeeded (re-fetch the master with `get_invoice`) before deleting
-the source — `delete_invoice` is irreversible for concept invoices.
+Always verify the copy succeeded (re-fetch the master with `get_invoice`) before deleting the
+source — `delete_invoice` is irreversible for concept invoices.
 
 ### 12. `delete_invoice` only deletes concept invoices — by design
 `invoice/delete` in the raw Hostfact API already refuses non-concept invoices, but
-`delete_invoice` in this server checks the status itself first (via `invoice/show`) and
-returns a clear error rather than relying solely on the upstream error message. There is
-no way to delete a sent/paid invoice through this tool — use `invoice/credit` (not yet
-exposed here) for that.
+`delete_invoice` in this server checks the status itself first (via `invoice/show`) and returns
+a clear error rather than relying solely on the upstream error message. There is no way to
+delete a sent/paid invoice through this tool — use `invoice/credit` (not yet exposed here) for
+that.
+
+### 13. `invoiceline/add` and `invoiceline/delete` require bracket notation, NOT a JSON string
+Unlike `invoice/add` (where `InvoiceLines` as a `json.dumps(...)` string works fine),
+`invoiceline/add` and `invoiceline/delete` reject a JSON-encoded `InvoiceLines` string with
+*"Invalid type for 'InvoiceLines'"* — confirmed by a live test. They need the same flattened
+bracket-notation form params used for `Subscription` (#8) and `CustomPrices`:
+
+```python
+params = dict(target)  # {"Identifier": ...} or {"InvoiceCode": ...}
+for i, line in enumerate(lines_param):
+    for k, v in line.items():
+        params[f"InvoiceLines[{i}][{k}]"] = v
+```
+
+Hostfact's API is inconsistent across endpoints about whether nested arrays accept a JSON
+string or require bracket notation — don't assume one endpoint's behavior applies to another;
+test against the live API before trusting a new nested-array parameter.
 
 ---
 
