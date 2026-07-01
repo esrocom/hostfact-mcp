@@ -8,7 +8,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, RedirectResponse
 
-app = FastAPI(title="Hostfact MCP Server", version="1.5.1")
+app = FastAPI(title="Hostfact MCP Server", version="1.6.0")
 
 # ─────────────────────────────────────────────
 # Audit log
@@ -17,7 +17,8 @@ app = FastAPI(title="Hostfact MCP Server", version="1.5.1")
 AUDIT_LOG_PATH = os.getenv("AUDIT_LOG_PATH", "/data/audit.log")
 
 # Write-actions: these mutate data in Hostfact
-WRITE_TOOLS = {"edit_product", "edit_service", "add_product", "add_debtor", "add_service", "add_invoice"}
+WRITE_TOOLS = {"edit_product", "edit_service", "add_product", "add_debtor", "add_service", "add_invoice",
+               "add_invoice_line", "delete_invoice_line", "delete_invoice"}
 
 def _audit(tool: str, arguments: dict, result: str, error: bool = False):
     """Append one line to the audit log."""
@@ -243,9 +244,60 @@ TOOLS = [
     },
     {
         "name": "get_invoice",
-        "description": "Haal één factuur op inclusief alle factuurregels, bedragen en betaalstatus. Gebruik factuurnummer zoals F20261919.",
-        "inputSchema": {"type": "object", "required": ["invoice_code"], "properties": {
-            "invoice_code": {"type": "string", "description": "Factuurnummer, bijv. F20261919"}
+        "description": (
+            "Haal één factuur op inclusief alle factuurregels, bedragen en betaalstatus. "
+            "Gebruik factuurnummer zoals F20261919, of identifier voor conceptfacturen die nog "
+            "geen factuurnummer hebben."
+        ),
+        "inputSchema": {"type": "object", "properties": {
+            "invoice_code": {"type": "string", "description": "Factuurnummer, bijv. F20261919 (conceptfacturen hebben hier meestal geen waarde voor)"},
+            "identifier": {"type": "string", "description": "Intern Hostfact factuur-ID (numeriek) — gebruik dit voor conceptfacturen"}
+        }}
+    },
+    {
+        "name": "add_invoice_line",
+        "description": (
+            "Voeg één of meer factuurregels toe aan een bestaande factuur, in elke status (ook "
+            "concept). Bruikbaar om conceptfacturen samen te voegen: kopieer de regels van de "
+            "ene conceptfactuur naar de andere en verwijder daarna de bronfactuur met "
+            "delete_invoice."
+        ),
+        "inputSchema": {"type": "object", "required": ["invoice_lines"], "properties": {
+            "invoice_code": {"type": "string", "description": "Factuurnummer van de doelfactuur"},
+            "identifier": {"type": "string", "description": "Intern factuur-ID van de doelfactuur (gebruik dit voor conceptfacturen zonder factuurnummer)"},
+            "invoice_lines": {
+                "type": "array",
+                "description": "Eén of meer factuurregels om toe te voegen",
+                "items": {"type": "object", "required": ["description", "price_excl"], "properties": {
+                    "description": {"type": "string"},
+                    "number": {"type": "number", "default": 1},
+                    "price_excl": {"type": "number"},
+                    "tax_percentage": {"type": "integer", "default": 21},
+                    "product_code": {"type": "string"}
+                }}
+            }
+        }}
+    },
+    {
+        "name": "delete_invoice_line",
+        "description": "Verwijder één factuurregel van een bestaande factuur via het interne regel-ID (zie InvoiceLines[].Identifier in get_invoice).",
+        "inputSchema": {"type": "object", "required": ["line_identifier"], "properties": {
+            "invoice_code": {"type": "string", "description": "Factuurnummer van de factuur"},
+            "identifier": {"type": "string", "description": "Intern factuur-ID (gebruik dit voor conceptfacturen zonder factuurnummer)"},
+            "line_identifier": {"type": "string", "description": "Intern ID van de te verwijderen factuurregel"}
+        }}
+    },
+    {
+        "name": "delete_invoice",
+        "description": (
+            "Verwijder een conceptfactuur volledig. Werkt uitsluitend op facturen met status "
+            "Concept (veiligheidscheck zit in deze tool, naast de restrictie van de Hostfact API "
+            "zelf) — gebruik dit bijvoorbeeld als laatste stap bij het samenvoegen van "
+            "conceptfacturen, nadat de regels via add_invoice_line zijn overgezet."
+        ),
+        "inputSchema": {"type": "object", "properties": {
+            "invoice_code": {"type": "string", "description": "Factuurnummer van de te verwijderen conceptfactuur"},
+            "identifier": {"type": "string", "description": "Intern factuur-ID (gebruik dit voor conceptfacturen zonder factuurnummer)"}
         }}
     },
 
@@ -533,14 +585,22 @@ async def _handle_tool_inner(name: str, arguments: dict) -> str:
                 )
             return "\n".join(lines)
 
-        # ── get_invoice (NEW) ──
+        # ── get_invoice (FIXED: + identifier support voor conceptfacturen) ──
         elif name == "get_invoice":
-            result = await hostfact_call("invoice", "show", {"InvoiceCode": arguments["invoice_code"]})
+            if arguments.get("identifier"):
+                show_params = {"Identifier": arguments["identifier"]}
+                label = str(arguments["identifier"])
+            elif arguments.get("invoice_code"):
+                show_params = {"InvoiceCode": arguments["invoice_code"]}
+                label = arguments["invoice_code"]
+            else:
+                return "❌ Geef invoice_code of identifier op."
+            result = await hostfact_call("invoice", "show", show_params)
             inv = result.get("invoice", {})
             if not inv:
-                return f"Factuur {arguments['invoice_code']} niet gevonden."
+                return f"Factuur {label} niet gevonden."
             lines = [
-                f"Factuur: {inv.get('InvoiceCode')}",
+                f"Factuur: {inv.get('InvoiceCode') or ('[concept] intern ID ' + str(inv.get('Identifier')))}",
                 f"Debiteur: {inv.get('DebtorCode')} — {inv.get('CompanyName')}",
                 f"Datum: {inv.get('Date')}",
                 f"Status: {fmt_status(inv.get('Status', ''))}",
@@ -561,6 +621,78 @@ async def _handle_tool_inner(name: str, arguments: dict) -> str:
                 for p in history:
                     lines.append(f"• {p.get('PaymentDate')} | €{p.get('AmountPaid')}")
             return "\n".join(lines)
+
+        # ── add_invoice_line (NEW) ──
+        elif name == "add_invoice_line":
+            if arguments.get("identifier"):
+                target = {"Identifier": arguments["identifier"]}
+                label = str(arguments["identifier"])
+            elif arguments.get("invoice_code"):
+                target = {"InvoiceCode": arguments["invoice_code"]}
+                label = arguments["invoice_code"]
+            else:
+                return "❌ Geef invoice_code of identifier op."
+            lines_param = [
+                {
+                    "Description": l["description"],
+                    "Number": l.get("number", 1),
+                    "PriceExcl": l["price_excl"],
+                    "TaxPercentage": l.get("tax_percentage", 21),
+                    **({"ProductCode": l["product_code"]} if l.get("product_code") else {}),
+                }
+                for l in arguments["invoice_lines"]
+            ]
+            params = {**target, "InvoiceLines": json.dumps(lines_param)}
+            result = await hostfact_call("invoiceline", "add", params)
+            if result.get("status") == "success":
+                return f"✅ {len(lines_param)} factuurregel(s) toegevoegd aan factuur {label}"
+            return f"❌ Fout: {result.get('errors', result)}"
+
+        # ── delete_invoice_line (NEW) ──
+        elif name == "delete_invoice_line":
+            if arguments.get("identifier"):
+                target = {"Identifier": arguments["identifier"]}
+                label = str(arguments["identifier"])
+            elif arguments.get("invoice_code"):
+                target = {"InvoiceCode": arguments["invoice_code"]}
+                label = arguments["invoice_code"]
+            else:
+                return "❌ Geef invoice_code of identifier op."
+            params = {**target, "InvoiceLines": json.dumps([{"Identifier": arguments["line_identifier"]}])}
+            result = await hostfact_call("invoiceline", "delete", params)
+            if result.get("status") == "success":
+                return f"✅ Factuurregel {arguments['line_identifier']} verwijderd van factuur {label}"
+            return f"❌ Fout: {result.get('errors', result)}"
+
+        # ── delete_invoice (NEW: alleen conceptfacturen, met veiligheidscheck) ──
+        elif name == "delete_invoice":
+            if arguments.get("identifier"):
+                target = {"Identifier": arguments["identifier"]}
+                label = str(arguments["identifier"])
+            elif arguments.get("invoice_code"):
+                target = {"InvoiceCode": arguments["invoice_code"]}
+                label = arguments["invoice_code"]
+            else:
+                return "❌ Geef invoice_code of identifier op."
+            # Veiligheidscheck: alleen conceptfacturen (status 0) mogen via deze tool verwijderd
+            # worden. De Hostfact API weigert dit zelf ook al voor niet-conceptfacturen, maar we
+            # controleren dit hier expliciet zodat de foutmelding duidelijk is en we nooit per
+            # ongeluk op een verkeerde factuur 'raden'.
+            show_result = await hostfact_call("invoice", "show", target)
+            inv = show_result.get("invoice", {})
+            if not inv:
+                return f"❌ Factuur {label} niet gevonden — niets verwijderd."
+            status_code = str(inv.get("Status", ""))
+            if status_code != "0":
+                return (
+                    f"❌ Factuur {label} heeft status '{fmt_status(status_code)}', geen Concept. "
+                    f"delete_invoice verwijdert uitsluitend conceptfacturen, om te voorkomen dat "
+                    f"verzonden/betaalde facturen per ongeluk verdwijnen."
+                )
+            result = await hostfact_call("invoice", "delete", target)
+            if result.get("status") == "success":
+                return f"✅ Conceptfactuur {label} verwijderd."
+            return f"❌ Fout: {result.get('errors', result)}"
 
         # ── list_creditinvoices (NEW) ──
         elif name == "list_creditinvoices":
@@ -955,7 +1087,7 @@ async def mcp_get(request: Request):
         "result": {
             "protocolVersion": "2024-11-05",
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "hostfact-mcp", "version": "1.5.1"}
+            "serverInfo": {"name": "hostfact-mcp", "version": "1.6.0"}
         }
     }
 
@@ -973,7 +1105,7 @@ async def mcp_post(request: Request):
             "result": {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "hostfact-mcp", "version": "1.5.1"}
+                "serverInfo": {"name": "hostfact-mcp", "version": "1.6.0"}
             }
         }
     elif method == "tools/list":
@@ -991,7 +1123,7 @@ async def mcp_post(request: Request):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "server": "hostfact-mcp", "version": "1.5.1"}
+    return {"status": "ok", "server": "hostfact-mcp", "version": "1.6.0"}
 
 @app.post("/register")
 async def oauth_register(request: Request):
