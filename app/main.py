@@ -250,8 +250,8 @@ TOOLS = [
             "geen factuurnummer hebben."
         ),
         "inputSchema": {"type": "object", "properties": {
-            "invoice_code": {"type": "string", "description": "Factuurnummer, bijv. F20261919 (conceptfacturen hebben hier meestal geen waarde voor)"},
-            "identifier": {"type": "string", "description": "Intern Hostfact factuur-ID (numeriek) — gebruik dit voor conceptfacturen"}
+            "invoice_code": {"type": "string", "description": "Factuurnummer, bijv. F20261919. Voor conceptfacturen: de volledige code inclusief prefix, bijv. [concept]1234 (zie list_invoices)"},
+            "identifier": {"type": "string", "description": "Intern Hostfact factuur-ID (numeriek) — alleen gebruiken als dit al bekend is uit een eerdere API-respons (bijv. InvoiceLines[].Identifier). NOOIT afleiden uit het nummer achter '[concept]' in een factuurcode, dat is geen Identifier"}
         }}
     },
     {
@@ -264,7 +264,7 @@ TOOLS = [
         ),
         "inputSchema": {"type": "object", "required": ["invoice_lines"], "properties": {
             "invoice_code": {"type": "string", "description": "Factuurnummer van de doelfactuur"},
-            "identifier": {"type": "string", "description": "Intern factuur-ID van de doelfactuur (gebruik dit voor conceptfacturen zonder factuurnummer)"},
+            "identifier": {"type": "string", "description": "Intern factuur-ID van de doelfactuur — alleen gebruiken als al bekend uit een eerdere API-respons. Voor conceptfacturen gebruik je invoice_code met de volledige code, bijv. [concept]1234 — leid dit NOOIT af uit het label"},
             "invoice_lines": {
                 "type": "array",
                 "description": "Eén of meer factuurregels om toe te voegen",
@@ -283,7 +283,7 @@ TOOLS = [
         "description": "Verwijder één factuurregel van een bestaande factuur via het interne regel-ID (zie InvoiceLines[].Identifier in get_invoice).",
         "inputSchema": {"type": "object", "required": ["line_identifier"], "properties": {
             "invoice_code": {"type": "string", "description": "Factuurnummer van de factuur"},
-            "identifier": {"type": "string", "description": "Intern factuur-ID (gebruik dit voor conceptfacturen zonder factuurnummer)"},
+            "identifier": {"type": "string", "description": "Intern factuur-ID — alleen gebruiken als al bekend uit een eerdere API-respons. Voor conceptfacturen gebruik je invoice_code met de volledige code, bijv. [concept]1234 — leid dit NOOIT af uit het label"},
             "line_identifier": {"type": "string", "description": "Intern ID van de te verwijderen factuurregel"}
         }}
     },
@@ -296,8 +296,8 @@ TOOLS = [
             "conceptfacturen, nadat de regels via add_invoice_line zijn overgezet."
         ),
         "inputSchema": {"type": "object", "properties": {
-            "invoice_code": {"type": "string", "description": "Factuurnummer van de te verwijderen conceptfactuur"},
-            "identifier": {"type": "string", "description": "Intern factuur-ID (gebruik dit voor conceptfacturen zonder factuurnummer)"}
+            "invoice_code": {"type": "string", "description": "Factuurnummer van de te verwijderen conceptfactuur, bijv. [concept]1234 (volledige code inclusief prefix)"},
+            "identifier": {"type": "string", "description": "Intern factuur-ID — alleen gebruiken als al bekend uit een eerdere API-respons. Leid dit NOOIT af uit het nummer achter '[concept]' in een factuurcode"}
         }}
     },
 
@@ -642,7 +642,14 @@ async def _handle_tool_inner(name: str, arguments: dict) -> str:
                 }
                 for l in arguments["invoice_lines"]
             ]
-            params = {**target, "InvoiceLines": json.dumps(lines_param)}
+            # Hostfact verwacht InvoiceLines hier als bracket-notatie (net als Subscription/
+            # CustomPrices elders in dit bestand) - een JSON-string wordt afgewezen met
+            # "Invalid type for 'InvoiceLines'". Dit is anders dan bij invoice/add, waar een
+            # JSON-string wel geaccepteerd wordt.
+            params = dict(target)
+            for i, line in enumerate(lines_param):
+                for k, v in line.items():
+                    params[f"InvoiceLines[{i}][{k}]"] = v
             result = await hostfact_call("invoiceline", "add", params)
             if result.get("status") == "success":
                 return f"✅ {len(lines_param)} factuurregel(s) toegevoegd aan factuur {label}"
@@ -658,7 +665,9 @@ async def _handle_tool_inner(name: str, arguments: dict) -> str:
                 label = arguments["invoice_code"]
             else:
                 return "❌ Geef invoice_code of identifier op."
-            params = {**target, "InvoiceLines": json.dumps([{"Identifier": arguments["line_identifier"]}])}
+            # Zelfde bracket-notatie vereiste als bij invoiceline/add, zie hierboven.
+            params = dict(target)
+            params["InvoiceLines[0][Identifier]"] = arguments["line_identifier"]
             result = await hostfact_call("invoiceline", "delete", params)
             if result.get("status") == "success":
                 return f"✅ Factuurregel {arguments['line_identifier']} verwijderd van factuur {label}"
