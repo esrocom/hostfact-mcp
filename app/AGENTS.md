@@ -91,6 +91,34 @@ Passing a raw dict or JSON string causes: *"Invalid type for 'Subscription'"*
 `product/add` rejects a `ProductCode` that already exists in the catalog.
 Always call `get_product` first to verify the code does not exist before attempting to create it.
 
+### 10. Concept invoices have no InvoiceCode
+Draft invoices (`Status = 0`, "Concept") often do not have a finalized `InvoiceCode` yet
+(it's only assigned once the invoice is sent). `invoice/show`, `invoiceline/add`,
+`invoiceline/delete` and `invoice/delete` all accept `Identifier` (internal numeric ID)
+as an alternative to `InvoiceCode` — use `Identifier` when working with concept invoices.
+
+`get_invoice`, `add_invoice_line`, `delete_invoice_line` and `delete_invoice` all accept
+either `invoice_code` or `identifier`; prefer `identifier` for anything still in Concept
+status.
+
+### 11. Merging concept invoices
+Hostfact's own "merge draft invoices" UI action has no dedicated API endpoint — it's built
+from the same primitives exposed here:
+1. `get_invoice` (via `identifier`) on each concept invoice to read its lines.
+2. `add_invoice_line` to copy the lines from the invoice(s) being merged away onto the
+   invoice that will remain ("master").
+3. `delete_invoice` on the now-empty source invoice(s).
+
+Always verify the copy succeeded (re-fetch the master with `get_invoice`) before deleting
+the source — `delete_invoice` is irreversible for concept invoices.
+
+### 12. `delete_invoice` only deletes concept invoices — by design
+`invoice/delete` in the raw Hostfact API already refuses non-concept invoices, but
+`delete_invoice` in this server checks the status itself first (via `invoice/show`) and
+returns a clear error rather than relying solely on the upstream error message. There is
+no way to delete a sent/paid invoice through this tool — use `invoice/credit` (not yet
+exposed here) for that.
+
 ---
 
 ## Available tools
@@ -114,3 +142,6 @@ Always call `get_product` first to verify the code does not exist before attempt
 | `add_debtor` | Create new debtor |
 | `add_service` | Add subscription |
 | `add_invoice` | Create invoice |
+| `add_invoice_line` | Add a line to an existing invoice (any status, incl. concept) |
+| `delete_invoice_line` | Remove a single line from an existing invoice |
+| `delete_invoice` | Delete a concept invoice (refuses non-concept invoices) |
