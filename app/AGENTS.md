@@ -96,9 +96,10 @@ Draft invoices (`Status = 0`, "Concept") are displayed with an `InvoiceCode` in 
 `"[concept]NNNN"` — they do have a code, it just isn't the final `F...`-style number assigned
 once the invoice is sent.
 
-`get_invoice`, `add_invoice_line`, `delete_invoice_line` and `delete_invoice` all accept either
-`invoice_code` or `identifier`. For a concept invoice, always pass the **entire string**
-`"[concept]NNNN"` as `invoice_code` — never extract `NNNN` and pass it as `identifier`.
+`get_invoice`, `add_invoice_line`, `delete_invoice_line`, `delete_invoice` and `send_invoice`
+all accept either `invoice_code` or `identifier`. For a concept invoice, always pass the
+**entire string** `"[concept]NNNN"` as `invoice_code` — never extract `NNNN` and pass it as
+`identifier`.
 
 Confirmed by a live test: calling a tool with `identifier: "3874"` (the number taken from a
 label `[concept]3874`) silently resolved to a completely unrelated, already-paid invoice from
@@ -121,6 +122,9 @@ from the same primitives exposed here:
 
 Always verify the copy succeeded (re-fetch the master with `get_invoice`) before deleting the
 source — `delete_invoice` is irreversible for concept invoices.
+
+Live-validated end-to-end (2026-07-01) across multiple concept-invoice pairs against the real
+Hostfact API, not just mocked.
 
 ### 12. `delete_invoice` only deletes concept invoices — by design
 `invoice/delete` in the raw Hostfact API already refuses non-concept invoices, but
@@ -145,6 +149,18 @@ for i, line in enumerate(lines_param):
 Hostfact's API is inconsistent across endpoints about whether nested arrays accept a JSON
 string or require bracket notation — don't assume one endpoint's behavior applies to another;
 test against the live API before trusting a new nested-array parameter.
+
+### 14. `send_invoice` is irreversible and customer-facing — verify content first
+`send_invoice` wraps `invoice/sendbyemail`. It only accepts `Identifier` or `InvoiceCode` — no
+other parameters. Calling it actually emails the invoice PDF to the debtor's registered email
+address and moves the invoice from Concept (0) to Verstuurd (2), assigning its final `F...`
+invoice number in the process. There is no "undo" for this via the API (crediting afterwards is
+a separate, visible transaction, not a silent rollback).
+
+Because of this, always confirm the invoice content is correct (`get_invoice`) — and, if
+relevant, finish any concept-invoice merge (#11) first — before calling `send_invoice`. Treat
+every call to this tool as a real action with real customer and financial impact, not a
+reversible test.
 
 ---
 
@@ -172,3 +188,4 @@ test against the live API before trusting a new nested-array parameter.
 | `add_invoice_line` | Add a line to an existing invoice (any status, incl. concept) |
 | `delete_invoice_line` | Remove a single line from an existing invoice |
 | `delete_invoice` | Delete a concept invoice (refuses non-concept invoices) |
+| `send_invoice` | Send an invoice by email (Concept → Verstuurd, assigns final invoice number, irreversible) |

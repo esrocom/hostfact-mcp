@@ -8,17 +8,17 @@ from pathlib import Path
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, RedirectResponse
 
-app = FastAPI(title="Hostfact MCP Server", version="1.6.0")
+app = FastAPI(title="Hostfact MCP Server", version="1.7.0")
 
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────
 # Audit log
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────
 
 AUDIT_LOG_PATH = os.getenv("AUDIT_LOG_PATH", "/data/audit.log")
 
 # Write-actions: these mutate data in Hostfact
 WRITE_TOOLS = {"edit_product", "edit_service", "add_product", "add_debtor", "add_service", "add_invoice",
-               "add_invoice_line", "delete_invoice_line", "delete_invoice"}
+               "add_invoice_line", "delete_invoice_line", "delete_invoice", "send_invoice"}
 
 def _audit(tool: str, arguments: dict, result: str, error: bool = False):
     """Append one line to the audit log."""
@@ -157,9 +157,9 @@ def _custom_price_tiers_to_form_params(tiers: list) -> dict:
             params[f"CustomPrices[{i}][PriceIncl]"] = tier["PriceIncl"]
     return params
 
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────
 # OAuth2 endpoints (minimal, for Claude.ai)
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────
 
 @app.get("/.well-known/oauth-authorization-server")
 async def oauth_metadata():
@@ -201,9 +201,9 @@ async def oauth_token(request: Request):
         "expires_in": 86400
     })
 
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────
 # MCP Tool definitions
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────
 
 TOOLS = [
     # ── DEBITEUREN ──
@@ -297,6 +297,20 @@ TOOLS = [
         ),
         "inputSchema": {"type": "object", "properties": {
             "invoice_code": {"type": "string", "description": "Factuurnummer van de te verwijderen conceptfactuur, bijv. [concept]1234 (volledige code inclusief prefix)"},
+            "identifier": {"type": "string", "description": "Intern factuur-ID — alleen gebruiken als al bekend uit een eerdere API-respons. Leid dit NOOIT af uit het nummer achter '[concept]' in een factuurcode"}
+        }}
+    },
+    {
+        "name": "send_invoice",
+        "description": (
+            "Verstuur een factuur per e-mail naar de debiteur. Dit zet de status om van Concept "
+            "naar Verstuurd en kent een definitief factuurnummer toe — dit is onomkeerbaar en "
+            "de klant ontvangt daadwerkelijk een e-mail met de factuur. Controleer de inhoud "
+            "van de factuur eerst (bijv. via get_invoice, en na eventueel samenvoegen van "
+            "conceptfacturen met add_invoice_line/delete_invoice) voordat je deze tool aanroept."
+        ),
+        "inputSchema": {"type": "object", "properties": {
+            "invoice_code": {"type": "string", "description": "Factuurnummer of volledige conceptcode, bijv. [concept]1234 (zie list_invoices/get_invoice)"},
             "identifier": {"type": "string", "description": "Intern factuur-ID — alleen gebruiken als al bekend uit een eerdere API-respons. Leid dit NOOIT af uit het nummer achter '[concept]' in een factuurcode"}
         }}
     },
@@ -508,9 +522,9 @@ TOOLS = [
     },
 ]
 
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────
 # Tool handlers
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────
 
 async def handle_tool(name: str, arguments: dict) -> str:
     result = await _handle_tool_inner(name, arguments)
@@ -622,7 +636,7 @@ async def _handle_tool_inner(name: str, arguments: dict) -> str:
                     lines.append(f"• {p.get('PaymentDate')} | €{p.get('AmountPaid')}")
             return "\n".join(lines)
 
-        # ── add_invoice_line (NEW) ──
+        # ── add_invoice_line ──
         elif name == "add_invoice_line":
             if arguments.get("identifier"):
                 target = {"Identifier": arguments["identifier"]}
@@ -655,7 +669,7 @@ async def _handle_tool_inner(name: str, arguments: dict) -> str:
                 return f"✅ {len(lines_param)} factuurregel(s) toegevoegd aan factuur {label}"
             return f"❌ Fout: {result.get('errors', result)}"
 
-        # ── delete_invoice_line (NEW) ──
+        # ── delete_invoice_line ──
         elif name == "delete_invoice_line":
             if arguments.get("identifier"):
                 target = {"Identifier": arguments["identifier"]}
@@ -673,7 +687,7 @@ async def _handle_tool_inner(name: str, arguments: dict) -> str:
                 return f"✅ Factuurregel {arguments['line_identifier']} verwijderd van factuur {label}"
             return f"❌ Fout: {result.get('errors', result)}"
 
-        # ── delete_invoice (NEW: alleen conceptfacturen, met veiligheidscheck) ──
+        # ── delete_invoice (alleen conceptfacturen, met veiligheidscheck) ──
         elif name == "delete_invoice":
             if arguments.get("identifier"):
                 target = {"Identifier": arguments["identifier"]}
@@ -703,7 +717,25 @@ async def _handle_tool_inner(name: str, arguments: dict) -> str:
                 return f"✅ Conceptfactuur {label} verwijderd."
             return f"❌ Fout: {result.get('errors', result)}"
 
-        # ── list_creditinvoices (NEW) ──
+        # ── send_invoice (NEW) ──
+        elif name == "send_invoice":
+            if arguments.get("identifier"):
+                target = {"Identifier": arguments["identifier"]}
+                label = str(arguments["identifier"])
+            elif arguments.get("invoice_code"):
+                target = {"InvoiceCode": arguments["invoice_code"]}
+                label = arguments["invoice_code"]
+            else:
+                return "❌ Geef invoice_code of identifier op."
+            result = await hostfact_call("invoice", "sendbyemail", target)
+            if result.get("status") == "success":
+                inv = result.get("invoice", {})
+                new_code = inv.get("InvoiceCode", "?")
+                email = inv.get("EmailAddress", "?")
+                return f"✅ Factuur {label} verzonden per e-mail naar {email} als {new_code}"
+            return f"❌ Fout: {result.get('errors', result)}"
+
+        # ── list_creditinvoices ──
         elif name == "list_creditinvoices":
             params = {}
             if arguments.get("debtor_code"):
@@ -726,7 +758,7 @@ async def _handle_tool_inner(name: str, arguments: dict) -> str:
                 )
             return "\n".join(lines)
 
-        # ── get_creditinvoice (NEW) ──
+        # ── get_creditinvoice ──
         elif name == "get_creditinvoice":
             result = await hostfact_call("creditinvoice", "show", {"CreditInvoiceCode": arguments["creditinvoice_code"]})
             inv = result.get("creditinvoice", {})
@@ -772,7 +804,7 @@ async def _handle_tool_inner(name: str, arguments: dict) -> str:
                 )
             return "\n".join(lines)
 
-        # ── get_service (NEW) ──
+        # ── get_service ──
         elif name == "get_service":
             result = await hostfact_call("service", "show", {"Identifier": arguments["identifier"]})
             service = result.get("service", {})
@@ -840,7 +872,7 @@ async def _handle_tool_inner(name: str, arguments: dict) -> str:
                 )
             return "\n".join(lines)
 
-        # ── edit_product (NEW: + product_type, custom_prices) ──
+        # ── edit_product (+ product_type, custom_prices) ──
         elif name == "edit_product":
             # Stap 1: haal intern Identifier op via product/show
             show_result = await hostfact_call("product", "show", {"ProductCode": arguments["product_code"]})
@@ -884,7 +916,7 @@ async def _handle_tool_inner(name: str, arguments: dict) -> str:
                 return f"✅ Product bijgewerkt: {', '.join(changes) if changes else 'geen wijzigingen opgegeven'}"
             return f"❌ Fout: {result.get('errors', result)}"
 
-        # ── get_product (NEW: + producttype en custom prices tonen) ──
+        # ── get_product (+ producttype en custom prices tonen) ──
         elif name == "get_product":
             result = await hostfact_call("product", "show", {"ProductCode": arguments["product_code"]})
             product = result.get("product", {})
@@ -912,7 +944,7 @@ async def _handle_tool_inner(name: str, arguments: dict) -> str:
                     )
             return "\n".join(lines)
 
-        # ── get_debtor_summary (FIXED) ──
+        # ── get_debtor_summary ──
         elif name == "get_debtor_summary":
             debtor_code = arguments["debtor_code"]
             year_filter = arguments.get("year_filter")
@@ -997,7 +1029,7 @@ async def _handle_tool_inner(name: str, arguments: dict) -> str:
 
             return "\n".join(lines)
 
-        # ── add_product (NEW: + product_type, custom_prices) ──
+        # ── add_product (+ product_type, custom_prices) ──
         elif name == "add_product":
             params = {
                 "ProductCode": arguments["product_code"],
@@ -1085,9 +1117,9 @@ async def _handle_tool_inner(name: str, arguments: dict) -> str:
         return f"Fout bij {name}: {str(e)}"
 
 
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────
 # MCP endpoints
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────
 
 @app.get("/mcp")
 async def mcp_get(request: Request):
@@ -1096,7 +1128,7 @@ async def mcp_get(request: Request):
         "result": {
             "protocolVersion": "2024-11-05",
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "hostfact-mcp", "version": "1.6.0"}
+            "serverInfo": {"name": "hostfact-mcp", "version": "1.7.0"}
         }
     }
 
@@ -1114,7 +1146,7 @@ async def mcp_post(request: Request):
             "result": {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "hostfact-mcp", "version": "1.6.0"}
+                "serverInfo": {"name": "hostfact-mcp", "version": "1.7.0"}
             }
         }
     elif method == "tools/list":
@@ -1132,7 +1164,7 @@ async def mcp_post(request: Request):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "server": "hostfact-mcp", "version": "1.6.0"}
+    return {"status": "ok", "server": "hostfact-mcp", "version": "1.7.0"}
 
 @app.post("/register")
 async def oauth_register(request: Request):
