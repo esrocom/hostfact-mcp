@@ -8,7 +8,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, RedirectResponse
 
-app = FastAPI(title="Hostfact MCP Server", version="1.4.3")
+app = FastAPI(title="Hostfact MCP Server", version="1.5.0")
 
 # ─────────────────────────────────────────────
 # Audit log
@@ -61,6 +61,10 @@ PERIODIC_LABEL = {
     "e": "eenmalig",
 }
 
+# Toegestane waarden voor het producttype-veld, zie HostFact API docs
+# https://www.hostfact.nl/developer/api/producten/edit
+VALID_PRODUCT_TYPES = {"domain", "hosting", "other", "ssl", "vps"}
+
 def check_auth(request: Request):
     if not MCP_AUTH_TOKEN:
         return
@@ -80,6 +84,59 @@ def fmt_status(code) -> str:
 
 def fmt_periodic(p) -> str:
     return PERIODIC_LABEL.get(str(p), str(p))
+
+def _validate_periodic(value: str, field: str = "price_period") -> str:
+    if value not in PERIODIC_LABEL:
+        raise ValueError(f"Ongeldige waarde voor {field}: {value!r}. Moet m, k, j of e zijn.")
+    return value
+
+def _validate_product_type(value: str) -> str:
+    if value not in VALID_PRODUCT_TYPES:
+        raise ValueError(f"Ongeldige product_type: {value!r}. Moet één van {sorted(VALID_PRODUCT_TYPES)} zijn.")
+    return value
+
+def _build_custom_price_tiers(custom_prices: list, tax_percentage=None) -> list:
+    """
+    Zet vereenvoudigde prijstiers (uit de tool-arguments) om naar de HostFact
+    CustomPrices structuur: [{Periods, Periodic, PriceExcl, PriceIncl}, ...]
+    """
+    if not custom_prices:
+        raise ValueError("custom_prices mag niet leeg zijn.")
+    tiers = []
+    for i, tier in enumerate(custom_prices):
+        missing = [k for k in ("periods", "periodic", "price_excl") if k not in tier]
+        if missing:
+            raise ValueError(f"custom_prices[{i}] mist verplichte velden: {missing}")
+        periodic = _validate_periodic(tier["periodic"], field=f"custom_prices[{i}].periodic")
+        price_excl = float(tier["price_excl"])
+        if tier.get("price_incl") is not None:
+            price_incl = float(tier["price_incl"])
+        elif tax_percentage is not None:
+            price_incl = round(price_excl * (1 + float(tax_percentage) / 100), 2)
+        else:
+            price_incl = price_excl
+        tiers.append({
+            "Periods": int(tier["periods"]),
+            "Periodic": periodic,
+            "PriceExcl": price_excl,
+            "PriceIncl": price_incl,
+        })
+    return tiers
+
+def _custom_price_tiers_to_form_params(tiers: list) -> dict:
+    """
+    Zet de CustomPrices-tiers om naar platte form-velden met bracket-notatie,
+    dezelfde stijl als Subscription[...] hierboven bij edit_service.
+    LET OP: dit is nog niet los getest tegen de HostFact API — controleer na
+    de eerste edit_product met custom_prices het resultaat via get_product.
+    """
+    params = {}
+    for i, tier in enumerate(tiers):
+        params[f"CustomPrices[{i}][Periods]"] = tier["Periods"]
+        params[f"CustomPrices[{i}][Periodic]"] = tier["Periodic"]
+        params[f"CustomPrices[{i}][PriceExcl]"] = tier["PriceExcl"]
+        params[f"CustomPrices[{i}][PriceIncl]"] = tier["PriceIncl"]
+    return params
 
 # ─────────────────────────────────────────────
 # OAuth2 endpoints (minimal, for Claude.ai)
@@ -237,21 +294,50 @@ TOOLS = [
     },
     {
         "name": "get_product",
-        "description": "Haal één product op via productcode. Geeft volledige productdetails inclusief prijs, BTW en facturatieperiode.",
+        "description": "Haal één product op via productcode. Geeft volledige productdetails inclusief prijs, BTW, facturatieperiode, producttype en eventuele afwijkende prijzen per periode.",
         "inputSchema": {"type": "object", "required": ["product_code"], "properties": {
             "product_code": {"type": "string", "description": "Productcode, bijv. P001 of ict2.0-desktop"}
         }}
     },
     {
         "name": "edit_product",
-        "description": "Pas een product aan in de Hostfact productcatalogus. Gebruik dit om de productcode, naam, prijs of BTW-percentage bij te werken. Vereist de huidige productcode om het product te vinden.",
+        "description": (
+            "Pas een product aan in de Hostfact productcatalogus. Gebruik dit om de productcode, "
+            "naam, prijs, BTW-percentage, producttype of afwijkende prijzen per periode bij te "
+            "werken. Vereist de huidige productcode om het product te vinden."
+        ),
         "inputSchema": {"type": "object", "required": ["product_code"], "properties": {
             "product_code": {"type": "string", "description": "Huidige productcode waarmee het product gevonden wordt"},
             "new_product_code": {"type": "string", "description": "Nieuwe productcode (bijv. MST-NCE-181-C100)"},
             "product_name": {"type": "string", "description": "Nieuwe productnaam"},
             "price_excl": {"type": "number", "description": "Nieuwe prijs excl. BTW"},
             "tax_percentage": {"type": "integer", "description": "Nieuw BTW-percentage (bijv. 21)"},
-            "price_period": {"type": "string", "description": "Facturatieperiode: m (maand), k (kwartaal), j (jaar), e (eenmalig)"}
+            "price_period": {"type": "string", "description": "Facturatieperiode: m (maand), k (kwartaal), j (jaar), e (eenmalig)"},
+            "product_type": {
+                "type": "string",
+                "enum": sorted(VALID_PRODUCT_TYPES),
+                "description": "Producttype: domain, hosting, other, ssl of vps"
+            },
+            "custom_prices": {
+                "type": "array",
+                "description": (
+                    "Afwijkende prijzen per periode voor dit product, bijv. een losse maand- en "
+                    "jaarprijs. Elk item: periods (int, factureer iedere N periodes), "
+                    "periodic (m/k/j/e), price_excl (float), price_incl (optioneel, wordt "
+                    "berekend uit tax_percentage als je 'm weglaat). Activeert automatisch "
+                    "afwijkende prijzen per periode voor dit product."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "periods": {"type": "integer"},
+                        "periodic": {"type": "string", "enum": ["m", "k", "j", "e"]},
+                        "price_excl": {"type": "number"},
+                        "price_incl": {"type": "number"}
+                    },
+                    "required": ["periods", "periodic", "price_excl"]
+                }
+            }
         }}
     },
 
@@ -271,7 +357,11 @@ TOOLS = [
     # ── AANMAKEN ──
     {
         "name": "add_product",
-        "description": "Maak een nieuw product aan in de Hostfact productcatalogus. Controleer eerst met get_product of de productcode al bestaat.",
+        "description": (
+            "Maak een nieuw product aan in de Hostfact productcatalogus, inclusief optioneel "
+            "producttype en afwijkende prijzen per periode. Controleer eerst met get_product of "
+            "de productcode al bestaat."
+        ),
         "inputSchema": {"type": "object", "required": ["product_code", "product_name", "description"], "properties": {
             "product_code": {"type": "string", "description": "Productcode, bijv. MST-NCE-122-C100"},
             "product_name": {"type": "string", "description": "Productnaam zoals getoond in de catalogus"},
@@ -279,7 +369,26 @@ TOOLS = [
             "product_description": {"type": "string", "description": "Uitgebreide catalogusomschrijving (optioneel)"},
             "price_excl": {"type": "number", "description": "Prijs excl. BTW"},
             "tax_percentage": {"type": "integer", "description": "BTW-percentage (bijv. 21)", "default": 21},
-            "price_period": {"type": "string", "description": "Facturatieperiode: m (maand), k (kwartaal), j (jaar), e (eenmalig)"}
+            "price_period": {"type": "string", "description": "Facturatieperiode: m (maand), k (kwartaal), j (jaar), e (eenmalig)"},
+            "product_type": {
+                "type": "string",
+                "enum": sorted(VALID_PRODUCT_TYPES),
+                "description": "Producttype: domain, hosting, other, ssl of vps. Standaard: other"
+            },
+            "custom_prices": {
+                "type": "array",
+                "description": "Afwijkende prijzen per periode, zelfde structuur als bij edit_product.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "periods": {"type": "integer"},
+                        "periodic": {"type": "string", "enum": ["m", "k", "j", "e"]},
+                        "price_excl": {"type": "number"},
+                        "price_incl": {"type": "number"}
+                    },
+                    "required": ["periods", "periodic", "price_excl"]
+                }
+            }
         }}
     },
     {
@@ -570,7 +679,7 @@ async def _handle_tool_inner(name: str, arguments: dict) -> str:
                 )
             return "\n".join(lines)
 
-        # ── edit_product (NEW) ──
+        # ── edit_product (NEW: + product_type, custom_prices) ──
         elif name == "edit_product":
             # Stap 1: haal intern Identifier op via product/show
             show_result = await hostfact_call("product", "show", {"ProductCode": arguments["product_code"]})
@@ -589,7 +698,13 @@ async def _handle_tool_inner(name: str, arguments: dict) -> str:
             if arguments.get("tax_percentage") is not None:
                 params["TaxPercentage"] = arguments["tax_percentage"]
             if arguments.get("price_period"):
-                params["PricePeriod"] = arguments["price_period"]
+                params["PricePeriod"] = _validate_periodic(arguments["price_period"])
+            if arguments.get("product_type"):
+                params["ProductType"] = _validate_product_type(arguments["product_type"])
+            if arguments.get("custom_prices"):
+                tiers = _build_custom_price_tiers(arguments["custom_prices"], arguments.get("tax_percentage"))
+                params["HasCustomPrice"] = "period"
+                params.update(_custom_price_tiers_to_form_params(tiers))
             result = await hostfact_call("product", "edit", params)
             if result.get("status") == "success":
                 changes = []
@@ -599,10 +714,16 @@ async def _handle_tool_inner(name: str, arguments: dict) -> str:
                     changes.append(f"naam → {arguments['product_name']}")
                 if arguments.get("price_excl") is not None:
                     changes.append(f"prijs → €{arguments['price_excl']}")
-                return f"✅ Product bijgewerkt: {', '.join(changes)}"
+                if arguments.get("price_period"):
+                    changes.append(f"periode → {fmt_periodic(arguments['price_period'])}")
+                if arguments.get("product_type"):
+                    changes.append(f"type → {arguments['product_type']}")
+                if arguments.get("custom_prices"):
+                    changes.append(f"{len(arguments['custom_prices'])} afwijkende prijstier(s) ingesteld")
+                return f"✅ Product bijgewerkt: {', '.join(changes) if changes else 'geen wijzigingen opgegeven'}"
             return f"❌ Fout: {result.get('errors', result)}"
 
-        # ── get_product (NEW) ──
+        # ── get_product (NEW: + producttype en custom prices tonen) ──
         elif name == "get_product":
             result = await hostfact_call("product", "show", {"ProductCode": arguments["product_code"]})
             product = result.get("product", {})
@@ -615,8 +736,19 @@ async def _handle_tool_inner(name: str, arguments: dict) -> str:
                 f"Omschrijving: {product.get('ProductDescription', '')}",
                 f"Prijs excl. BTW: €{product.get('PriceExcl')} per {periodic}",
                 f"BTW-percentage: {product.get('TaxPercentage', 21)}%",
+                f"Producttype: {product.get('ProductType', '?')}",
                 f"Categorie: {product.get('Category', '?')}",
             ]
+            custom_prices = product.get("CustomPrices")
+            if product.get("HasCustomPrice") not in (None, "", "no") and custom_prices:
+                lines.append("")
+                lines.append("── Afwijkende prijzen per periode ──")
+                for tier in custom_prices:
+                    tier_periodic = fmt_periodic(tier.get("Periodic", ""))
+                    lines.append(
+                        f"• iedere {tier.get('Periods', 1)} {tier_periodic} | "
+                        f"€{tier.get('PriceExcl')} excl. BTW / €{tier.get('PriceIncl')} incl. BTW"
+                    )
             return "\n".join(lines)
 
         # ── get_debtor_summary (FIXED) ──
@@ -704,7 +836,7 @@ async def _handle_tool_inner(name: str, arguments: dict) -> str:
 
             return "\n".join(lines)
 
-        # ── add_product ──
+        # ── add_product (NEW: + product_type, custom_prices) ──
         elif name == "add_product":
             params = {
                 "ProductCode": arguments["product_code"],
@@ -718,10 +850,22 @@ async def _handle_tool_inner(name: str, arguments: dict) -> str:
             if arguments.get("tax_percentage") is not None:
                 params["TaxPercentage"] = arguments["tax_percentage"]
             if arguments.get("price_period"):
-                params["PricePeriod"] = arguments["price_period"]
+                params["PricePeriod"] = _validate_periodic(arguments["price_period"])
+            if arguments.get("product_type"):
+                params["ProductType"] = _validate_product_type(arguments["product_type"])
+            if arguments.get("custom_prices"):
+                tiers = _build_custom_price_tiers(arguments["custom_prices"], arguments.get("tax_percentage"))
+                params["HasCustomPrice"] = "period"
+                params.update(_custom_price_tiers_to_form_params(tiers))
             result = await hostfact_call("product", "add", params)
             if result.get("status") == "success":
-                return f"✅ Product aangemaakt: {arguments['product_code']} — {arguments['product_name']}"
+                extra = []
+                if arguments.get("product_type"):
+                    extra.append(f"type {arguments['product_type']}")
+                if arguments.get("custom_prices"):
+                    extra.append(f"{len(arguments['custom_prices'])} afwijkende prijstier(s)")
+                extra_label = f" ({', '.join(extra)})" if extra else ""
+                return f"✅ Product aangemaakt: {arguments['product_code']} — {arguments['product_name']}{extra_label}"
             return f"❌ Fout: {result.get('errors', result)}"
 
         # ── add_debtor ──
@@ -791,7 +935,7 @@ async def mcp_get(request: Request):
         "result": {
             "protocolVersion": "2024-11-05",
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "hostfact-mcp", "version": "1.4.3"}
+            "serverInfo": {"name": "hostfact-mcp", "version": "1.5.0"}
         }
     }
 
@@ -809,7 +953,7 @@ async def mcp_post(request: Request):
             "result": {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "hostfact-mcp", "version": "1.4.3"}
+                "serverInfo": {"name": "hostfact-mcp", "version": "1.5.0"}
             }
         }
     elif method == "tools/list":
@@ -827,7 +971,7 @@ async def mcp_post(request: Request):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "server": "hostfact-mcp", "version": "1.4.3"}
+    return {"status": "ok", "server": "hostfact-mcp", "version": "1.5.0"}
 
 @app.post("/register")
 async def oauth_register(request: Request):
