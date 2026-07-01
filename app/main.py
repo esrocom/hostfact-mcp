@@ -8,7 +8,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, RedirectResponse
 
-app = FastAPI(title="Hostfact MCP Server", version="1.5.0")
+app = FastAPI(title="Hostfact MCP Server", version="1.5.1")
 
 # ─────────────────────────────────────────────
 # Audit log
@@ -95,10 +95,22 @@ def _validate_product_type(value: str) -> str:
         raise ValueError(f"Ongeldige product_type: {value!r}. Moet één van {sorted(VALID_PRODUCT_TYPES)} zijn.")
     return value
 
-def _build_custom_price_tiers(custom_prices: list, tax_percentage=None) -> list:
+def _build_custom_price_tiers(custom_prices: list) -> list:
     """
     Zet vereenvoudigde prijstiers (uit de tool-arguments) om naar de HostFact
-    CustomPrices structuur: [{Periods, Periodic, PriceExcl, PriceIncl}, ...]
+    CustomPrices structuur: [{Periods, Periodic, PriceExcl, [PriceIncl]}, ...]
+
+    BELANGRIJK (financiële correctheid):
+    We berekenen of ronden PriceIncl HIER NOOIT zelf af en sturen die nooit
+    "gegokt" mee. Reden: HostFact blijkt bij deze CustomPrices-array PriceIncl
+    als leidend te behandelen en PriceExcl er intern uit terug te rekenen
+    (PriceExcl = PriceIncl / (1 + belasting)). Stuur je zelf een afgeronde of
+    verzonnen PriceIncl mee, dan verschuift PriceExcl daardoor net iets -
+    onopgemerkt, want de melding blijft "succes".
+    Daarom: PriceIncl wordt ALLEEN meegestuurd als de aanroeper 'm expliciet
+    opgeeft. Wordt 'ie weggelaten, dan laten we HostFact 'm zelf berekenen op
+    basis van PriceExcl en het al ingestelde BTW-percentage van het product -
+    dat is exact, wij hoeven niet te gokken.
     """
     if not custom_prices:
         raise ValueError("custom_prices mag niet leeg zijn.")
@@ -109,33 +121,39 @@ def _build_custom_price_tiers(custom_prices: list, tax_percentage=None) -> list:
             raise ValueError(f"custom_prices[{i}] mist verplichte velden: {missing}")
         periodic = _validate_periodic(tier["periodic"], field=f"custom_prices[{i}].periodic")
         price_excl = float(tier["price_excl"])
+
+        entry = {"Periods": int(tier["periods"]), "Periodic": periodic, "PriceExcl": price_excl}
+
         if tier.get("price_incl") is not None:
             price_incl = float(tier["price_incl"])
-        elif tax_percentage is not None:
-            price_incl = round(price_excl * (1 + float(tax_percentage) / 100), 2)
-        else:
-            price_incl = price_excl
-        tiers.append({
-            "Periods": int(tier["periods"]),
-            "Periodic": periodic,
-            "PriceExcl": price_excl,
-            "PriceIncl": price_incl,
-        })
+            # Sanity-check: incl. BTW moet altijd >= excl. BTW zijn (BTW is nooit negatief).
+            # Vangt per ongeluk verwisselde velden of evidente typefouten af vóór verzending.
+            if price_incl < price_excl:
+                raise ValueError(
+                    f"custom_prices[{i}]: price_incl ({price_incl}) is lager dan "
+                    f"price_excl ({price_excl}) - dat kan niet kloppen, controleer de invoer."
+                )
+            entry["PriceIncl"] = price_incl
+        # Geen 'else' tak: als price_incl niet is opgegeven, blijft het veld
+        # gewoon weg. Geen berekening, geen afronding, geen giswerk.
+
+        tiers.append(entry)
     return tiers
 
 def _custom_price_tiers_to_form_params(tiers: list) -> dict:
     """
     Zet de CustomPrices-tiers om naar platte form-velden met bracket-notatie,
     dezelfde stijl als Subscription[...] hierboven bij edit_service.
-    LET OP: dit is nog niet los getest tegen de HostFact API — controleer na
-    de eerste edit_product met custom_prices het resultaat via get_product.
+    PriceIncl wordt alleen meegestuurd als die expliciet in de tier aanwezig is
+    (zie _build_custom_price_tiers) - nooit een berekende/afgeronde gok.
     """
     params = {}
     for i, tier in enumerate(tiers):
         params[f"CustomPrices[{i}][Periods]"] = tier["Periods"]
         params[f"CustomPrices[{i}][Periodic]"] = tier["Periodic"]
         params[f"CustomPrices[{i}][PriceExcl]"] = tier["PriceExcl"]
-        params[f"CustomPrices[{i}][PriceIncl]"] = tier["PriceIncl"]
+        if "PriceIncl" in tier:
+            params[f"CustomPrices[{i}][PriceIncl]"] = tier["PriceIncl"]
     return params
 
 # ─────────────────────────────────────────────
@@ -323,9 +341,11 @@ TOOLS = [
                 "description": (
                     "Afwijkende prijzen per periode voor dit product, bijv. een losse maand- en "
                     "jaarprijs. Elk item: periods (int, factureer iedere N periodes), "
-                    "periodic (m/k/j/e), price_excl (float), price_incl (optioneel, wordt "
-                    "berekend uit tax_percentage als je 'm weglaat). Activeert automatisch "
-                    "afwijkende prijzen per periode voor dit product."
+                    "periodic (m/k/j/e), price_excl (float), price_incl (optioneel - laat dit "
+                    "weg om HostFact het BTW-inclusieve bedrag zelf te laten berekenen op basis "
+                    "van het BTW-percentage van het product; wordt nooit door deze tool gegokt "
+                    "of afgerond). Activeert automatisch afwijkende prijzen per periode voor dit "
+                    "product."
                 ),
                 "items": {
                     "type": "object",
@@ -702,7 +722,7 @@ async def _handle_tool_inner(name: str, arguments: dict) -> str:
             if arguments.get("product_type"):
                 params["ProductType"] = _validate_product_type(arguments["product_type"])
             if arguments.get("custom_prices"):
-                tiers = _build_custom_price_tiers(arguments["custom_prices"], arguments.get("tax_percentage"))
+                tiers = _build_custom_price_tiers(arguments["custom_prices"])
                 params["HasCustomPrice"] = "period"
                 params.update(_custom_price_tiers_to_form_params(tiers))
             result = await hostfact_call("product", "edit", params)
@@ -854,7 +874,7 @@ async def _handle_tool_inner(name: str, arguments: dict) -> str:
             if arguments.get("product_type"):
                 params["ProductType"] = _validate_product_type(arguments["product_type"])
             if arguments.get("custom_prices"):
-                tiers = _build_custom_price_tiers(arguments["custom_prices"], arguments.get("tax_percentage"))
+                tiers = _build_custom_price_tiers(arguments["custom_prices"])
                 params["HasCustomPrice"] = "period"
                 params.update(_custom_price_tiers_to_form_params(tiers))
             result = await hostfact_call("product", "add", params)
@@ -935,7 +955,7 @@ async def mcp_get(request: Request):
         "result": {
             "protocolVersion": "2024-11-05",
             "capabilities": {"tools": {}},
-            "serverInfo": {"name": "hostfact-mcp", "version": "1.5.0"}
+            "serverInfo": {"name": "hostfact-mcp", "version": "1.5.1"}
         }
     }
 
@@ -953,7 +973,7 @@ async def mcp_post(request: Request):
             "result": {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "hostfact-mcp", "version": "1.5.0"}
+                "serverInfo": {"name": "hostfact-mcp", "version": "1.5.1"}
             }
         }
     elif method == "tools/list":
@@ -971,7 +991,7 @@ async def mcp_post(request: Request):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "server": "hostfact-mcp", "version": "1.5.0"}
+    return {"status": "ok", "server": "hostfact-mcp", "version": "1.5.1"}
 
 @app.post("/register")
 async def oauth_register(request: Request):
